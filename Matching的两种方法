@@ -1,0 +1,171 @@
+# # # Matching (PSM and CEM)
+# 1. 载入Matching包
+library(rio)
+library(data.table)
+library(cem)           ###CEM matching 包
+library(MatchIt)       ### PSM matching包
+
+# 2.载入数据
+data=fread("C:/Users/62678/Desktop/R学习/Matching_Tutorial-master/data.csv")
+colnames(data)
+
+# 3.描述数据（有无insurance，如何影响average sales）
+description = fread("description.csv")
+## Description of Variables 
+library(knitr)
+kable(description, caption = "Description of Variables")   # # 加表名
+
+# 4. 首先考虑：Simple linear regression
+slr_no_match = lm(AvgSales~Insurance, data = data) 
+## Output the regression results
+kable(summary(slr_no_match)$coefficients, caption = "Simple Linear Regression without Matching")
+
+# 5.再考虑: multiple linear regression(加一些控制变量)
+mlr_no_match = lm(AvgSales~Insurance + ProcedureAge + AvgCompNum + AvgReviews + PriceDeposit + PricePaid + PriceOrigin + Public + SurgeonNum + ReviewBonus + Ad + Financing + GroupPurchase, data = data) 
+## Output the regression results
+kable(summary(mlr_no_match)$coefficients, caption = "Multiple Linear Regression without Matching")
+
+# 6.运用PSM matching来进行multiple linear regression
+# 6.1 用PSM来进行multiple linear regression
+
+# (1)先对比有insurance和没有insurance两组的各变量均值差别（既：对比treat and control group的各个变量的均值差）
+# 对比除了自变量以外所有其它变量的差别
+###创建一个空表
+ttest_table_before_match = data.table(varname =character(), t.value=numeric(),
+                                      p.value = numeric(), mean_no_insurance = numeric(),
+                                      mean_with_insurance = numeric(), diff = numeric())
+### T-test for all variables(对比各变量两组的均值，进行t-test)
+for (col in colnames(data)) {
+  if (col == "Insurance" | col == "ProcedureID") next
+  zz = t.test(get(col)~get("Insurance"),data = data)
+  tvalue = zz$statistic[[1]]
+  pvalue = zz$p.value
+  mean1 = zz$estimate[[1]]
+  mean2 = zz$estimate[[2]]
+  temp = ttest_table_before_match[,list(varname = col, t.value = tvalue,
+                                        p.value = pvalue, mean_no_insurance = mean1,
+                                        mean_with_insurance = mean2,
+                                        diff = mean1 - mean2)]
+  ttest_table_before_match = rbind(temp,ttest_table_before_match)
+}
+
+kable(ttest_table_before_match, caption = "Compare the Mean of All Variables of Insured and Uninsured Procedures before Matching")
+
+# (2)进行PSM，展现PSM的结果
+psm = matchit(Insurance ~  ProcedureAge + AvgCompNum + AvgReviews + PriceDeposit  + PricePaid + PriceOrigin + Public + SurgeonNum + ReviewBonus + Ad + Financing + GroupPurchase ,
+              data = data, method = "nearest",
+              ratio = 1, distance = 'logit', caliper = .05)
+
+## distance: This argument specifies the method used to estimate the distance measure. The default is logistic regression, "logit". A variety of other methods are available.
+## nearest: This means the matching method we use for PSM is nearest neighbor.
+## ratio: the number of control units to match to each treated unit (default = 1, one-to-one matching).
+## caliper: the number of standard deviations of the distance measure within which to draw control units (default = 0, no caliper matching). If a caliper is specified, a control unit within the caliper for a treated unit is randomly selected as the match for that treated unit. I
+
+psm_result = summary(psm)  #查看psm的结果
+kable(as.table(psm_result$nn), caption = "Matching Results")
+
+# (3) 过滤掉没有Matching的数据
+data_psm = cbind(data, weights = psm$weights) #给每个id给一个weight(0,1)
+data_psm = data_psm[!(weights == 0)]   #删掉weight为0的个体
+
+# (4) 对比PSM过滤以后的control和treat group的各个变量的均值对比
+### Create blank data table
+ttest_table_after_match = data.table(varname =character(), t.value=numeric(),
+                                     p.value = numeric(), mean_no_insurance = numeric(),
+                                     mean_with_insurance = numeric(), diff = numeric())
+### T-test for all variables
+for (col in colnames(data_psm[,-c("ProcedureID","weights")])) {
+  if (col == "Insurance") next
+  zz = t.test(get(col)~get("Insurance"),data = data_psm)
+  tvalue = zz$statistic[[1]]
+  pvalue = zz$p.value
+  mean1 = zz$estimate[[1]]
+  mean2 = zz$estimate[[2]]
+  temp = ttest_table_after_match[,list(varname = col, t.value = tvalue,
+                                       p.value = pvalue, mean_no_insurance = mean1,
+                                       mean_with_insurance = mean2,
+                                       diff = mean1 - mean2)]
+  ttest_table_after_match = rbind(temp,ttest_table_after_match)
+}
+
+kable(ttest_table_after_match, caption = "Matching Results")
+
+# (5)用过滤后的PSM数据进行回归
+mlr_after_psm=lm(AvgSales~Insurance + ProcedureAge + AvgCompNum + AvgReviews + PriceDeposit + PricePaid + PriceOrigin + Public + SurgeonNum + ReviewBonus + Ad + Financing + GroupPurchase, data = data_psm)
+kable(summary(mlr_after_psm)$coefficients, caption = "Multiple Linear Regression after PSM Matching")
+
+#6.2 CEM 进行多元回归
+
+# (1) 看一下CEM前的每个变量之间的imbalance
+## Automatical coarsening for continuous variables
+#cut.point就是分组的值
+#首先设定每个变量的cut.point(对于连续变量，中间值设置为：sturges; 若是指定的数字，01变量，就是0.5)
+cut_auto = list(PriceDeposit = "sturges",PricePaid = "sturges", PriceOrigin = "sturges",ProcedureAge = "sturges", AvgCompNum = "sturges", SurgeonNum = c(1.5), AvgReviews = "sturges", Public = c(0.5), ReviewBonus = c(0.5),Ad = c(0.5),Financing = c(0.5),GroupPurchase = c(0.5))
+## Check the imbalance（相对于中间值，对于两组，L1越接近与0越平衡）
+rr = imbalance(data$Insurance, data, drop=c("ProcedureID","AvgSales","Insurance"), breaks = cut_auto)
+kable(rr$tab, caption = "Imbalance before CEM from Automatical Coarsening")
+
+# (2) Automatical coarsening (CEM)
+cem_auto <- cem(treatment = "Insurance", data = data, cutpoints = cut_auto, keep.all=TRUE,eval.imbalance = TRUE, drop = c("ProcedureID","AvgSales","Insurance"), L1.breaks = cut_auto )
+kable(cem_auto$imbalance$tab, caption = "Imbalance after CEM from Automatical Coarsening")
+
+# (3) Manual Coarsening (CEM)
+# sturges rule works well for normally distributed variable. 
+#Therefore, it is important to check the distributions of all continuous variables before matching.
+library(ggplot2)
+# 画出每个变量的直方图，看看是否符合normal distribute
+ProcedureAgeHist <- ggplot(data, aes(x=ProcedureAge)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("ProcedureAge")
+
+AvgCompNumHist <- ggplot(data, aes(x=AvgCompNum)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("AvgCompNum")
+
+AvgReviewsHist <- ggplot(data, aes(x=AvgReviews)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("AvgReviews")
+
+PriceDepositHist <- ggplot(data, aes(x=PriceDeposit)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("PriceDeposit")
+
+PricePaidHist <- ggplot(data[PricePaid<150000], aes(x=PricePaid)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("PricePaid")
+
+PriceOriginHist <- ggplot(data, aes(x=PriceOrigin)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("PriceOrigin")
+
+SurgeonNumHist <- ggplot(data, aes(x=SurgeonNum)) + geom_histogram(bins = 15, color="darkblue", fill="lightblue") + theme_bw() +
+  xlab("SurgeonNum")
+
+library(gridExtra)
+grid.arrange( ProcedureAgeHist, AvgCompNumHist,AvgReviewsHist,PriceDepositHist,PricePaidHist,PriceOriginHist,SurgeonNumHist, ncol=3)
+
+#(4)人为的定义一些cut.point
+## Define cut points（找分类的点，很依靠之前的知识）
+PriceDepositCut = c(99.5,999.5)
+PricePaidCut = c(999.5,4999.5,9999.5)
+PriceOriginCut = c(999.5,4999.5,9999.5)
+ProcedureAgeCut = 2
+AvgCompNumCut = 2
+SurgeonNumCut = c(0.5,1.5)
+AvgReviewsCut = 2
+
+## Save the cut points into a list
+cut_man = list(ProcedureAge = ProcedureAgeCut, AvgCompNum = AvgCompNumCut, AvgReviews = AvgReviewsCut, PriceDeposit = PriceDepositCut, PricePaid = PricePaidCut, PriceOrigin = PriceOriginCut,  SurgeonNum = SurgeonNumCut,Public = c(0.5), ReviewBonus = c(0.5),Ad = c(0.5),Financing = c(0.5),GroupPurchase = c(0.5))
+
+### Imbalance before matching
+rr = imbalance(data$Insurance, data, drop=c("ProcedureID","AvgSales", "Insurance"), breaks = cut_man)
+kable(rr$tab, caption = "Imbalance before CEM from Manual Coarsening")
+
+### CEM matching
+cem_man <- cem(treatment = "Insurance", data = data, keep.all=TRUE, eval.imbalance = TRUE, drop = c("ProcedureID","Insurance",  "AvgSales"),cutpoints = cut_man, L1.breaks = cut_man )
+
+## Show imbalance measurement after matching
+kable(cem_man$imbalance$tab, caption = "Imbalance after CEM from Manual Coarsening")
+
+# (5)运用CEM过滤数据
+data_cem_man = cbind(data, weight = cem_man$w)
+summary(data_cem_man$weight)
+
+# (6)用过滤后的数据来回归
+mlr_after_cem = lm(AvgSales~Insurance + ProcedureAge + AvgCompNum + AvgReviews + PriceDeposit + PricePaid + PriceOrigin + Public + SurgeonNum + ReviewBonus + Ad + Financing + GroupPurchase, data = data_cem_man, weights = weight) 
+
+kable(summary(mlr_after_cem)$coefficients, caption = "Multiple Linear Regression after CEM Matching")
