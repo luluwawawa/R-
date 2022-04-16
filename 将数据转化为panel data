@@ -1,0 +1,27 @@
+# # # reshape a data into panel
+
+#1. using data.table 
+library(rio)          # #所有数据格式都可以导入
+library(data.table)
+
+#2. 导入数据
+data=import("C:/Users/62678/Desktop/test data/test.xls",setclass="data.table")
+DT2=import("C:/Users/62678/Desktop/test data/control.xlsx",setclass="data.table")
+  
+#3. melt panel data
+DT=melt(data,id.vars = "login",measure.vars = patterns("pull(.*)","select(.*)"),
+        variable.name = "month",value.name = c("pull","select"))
+
+DT1=DT[order(DT$login),]    # # # 聚合panel data
+DT1[is.na(DT1)]=0   # # 把空值变为0
+
+#4. 再和控制变量merge
+Final = merge(DT1,DT2,by="login",all=TRUE) 
+##merge要求两个表，至少有1列相同
+
+#5.写出
+fwrite(Final,"fianl.csv")
+
+#6. rbind and cbind
+rbind(table1,table2)  ## 在table2 上加上一行
+cbind(A,B) ## 就是加上1列
